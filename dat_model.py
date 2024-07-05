@@ -142,7 +142,7 @@ if __name__ == "__main__":
 
         return mapping
 
-    def onnx2keras_dat(mapping, save_path):
+    def onnx2keras_dat(mapping, save_path, fuse_ln=False):
         model = DAT()()
         # model.summary()
         for layer in model.layers:
@@ -212,8 +212,36 @@ if __name__ == "__main__":
                 bias = bias * mul
                 layer.set_weights([kernel, bias])
 
+        if fuse_ln:
+            ln_map = [[f"._blocks.{i}._norm1._LayerNormalization", f"._blocks.{i}._attn._qkv._MatMulAdd"] for i in range(12)]
+            ln_map += [[f"._blocks.{i}._norm2._LayerNormalization", f"._blocks.{i}._mlp._fc1._MatMulAdd"] for i in range(12)]
+            ln_map += [[f"._norm_{i}._LayerNormalization", f"._depth_head._projects.{i}._Conv"] for i in range(4)]
+            print("num LayerNorm :", len(ln_map))
+            for couple in ln_map:
+                print("ln name :", couple[0])
+                print("linear name :", couple[1])
+                ln_layer = model.get_layer(couple[0])
+                linear_layer = model.get_layer(couple[1])
+                ln_weights = ln_layer.get_weights()
+                gamma = ln_weights[0]
+                beta = ln_weights[1]
+                linear_weights = linear_layer.get_weights()
+                kernel = linear_weights[0]
+                bias = linear_weights[1] if len(linear_weights) == 2 else None
+                print("gamma, beta shape :", gamma.shape, "kernel shape :", kernel.shape, "kernel shape :", bias.shape)
+                if len(kernel.shape) == 2:
+                    fuse_kernel = (kernel.T * gamma).T
+                    fuse_bias = beta @ kernel + bias
+                else:
+                    fuse_kernel = (kernel.transpose(0, 1, 3, 2) * gamma).transpose(0, 1, 3, 2)
+                    fuse_bias = beta @ (np.sum(kernel, axis=(0, 1))) + bias
+                ln_layer.set_weights([np.ones(shape=gamma.shape, dtype=float), np.zeros(shape=beta.shape, dtype=float)])
+                # linear_layer.set_weights([fuse_kernel, fuse_bias])
+                print("------")
+
         model.save(save_path)
 
-    onnx2keras_dat(map_w_onnx(), "saved/dat.h5")
+    # onnx2keras_dat(map_w_onnx(), "saved/dat_ln_fused.h5", fuse_ln=True)
+    onnx2keras_dat(map_w_onnx(), "saved/dat.h5", fuse_ln=False)
 
 
